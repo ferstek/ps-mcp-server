@@ -231,17 +231,67 @@ const mcpHandler = createMcpHandler(
   }
 );
 
-export default async function handler(req) {
+function patchNodeRequest(req, res) {
+  // Add AbortController signal (adapter uses req.signal for cleanup)
+  if (!req.signal) {
+    const ac = new AbortController();
+    req.signal = ac.signal;
+    res.on('close', () => ac.abort());
+  }
+
+  // Add Fetch-style headers.get()
+  if (typeof req.headers.get !== 'function') {
+    const raw = req.headers;
+    req.headers = Object.assign(Object.create(null), raw, {
+      get: (name) => {
+        const v = raw[name.toLowerCase()];
+        return v != null ? (Array.isArray(v) ? v.join(', ') : String(v)) : null;
+      },
+    });
+  }
+
+  // Add req.text() / req.json() (adapter reads the body this way)
+  if (typeof req.text !== 'function') {
+    req.text = () =>
+      new Promise((resolve, reject) => {
+        const chunks = [];
+        req.on('data', (c) => chunks.push(Buffer.from(c)));
+        req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+        req.on('error', reject);
+      });
+    req.json = async () => JSON.parse(await req.text());
+  }
+}
+
+export default async function handler(req, res) {
+  patchNodeRequest(req, res);
+
+  // Auth check
   const secret = process.env.MCP_SECRET;
   if (secret) {
-    const auth = (typeof req.headers.get === 'function' ? req.headers.get('authorization') : req.headers['authorization']) ?? '';
+    const auth = req.headers.get('authorization') ?? '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
     if (token !== secret) {
-      return new Response('Unauthorized', {
-        status: 401,
-        headers: { 'WWW-Authenticate': 'Bearer' },
-      });
+      res.writeHead(401, { 'WWW-Authenticate': 'Bearer' });
+      res.end('Unauthorized');
+      return;
     }
   }
-  return mcpHandler(req);
+
+  // The adapter returns a Fetch Response — pipe it back to Node.js res
+  const response = await mcpHandler(req);
+  res.writeHead(response.status, Object.fromEntries(response.headers.entries()));
+  if (response.body) {
+    const reader = response.body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!res.writableEnded) res.write(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  if (!res.writableEnded) res.end();
 }
