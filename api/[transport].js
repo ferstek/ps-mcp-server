@@ -168,23 +168,27 @@ const mcpHandler = createMcpHandler(
       'get_product_stock',
       {
         title: 'Get Product Stock',
-        description: 'Consulta el stock de un producto en PrestaShop por ID numérico o referencia (SKU).',
+        description:
+          'Consulta el stock de un producto en PrestaShop por SKU de combinación (ej: ABU04), SKU base o ID numérico. Devuelve stock total y detalle por cada combinación/variante.',
         inputSchema: {
-          identifier: z
-            .string()
-            .describe('ID numérico del producto o referencia/SKU (ej: 123 o REF-ABC)'),
+          identifier: z.string().describe('SKU de combinación (ej: ABU04), SKU base o ID numérico del producto (ej: 48)'),
         },
       },
-      async ({ identifier }) => {
-        const ps = getClient();
-        const product = await ps.getProductStock(identifier.trim());
-        if (!product) {
-          return {
-            content: [{ type: 'text', text: `No se encontró producto con identificador "${identifier}".` }],
-          };
-        }
-        return { content: [{ type: 'text', text: JSON.stringify(product, null, 2) }] };
-      }
+      async ({ identifier }) => callDbTool('get_product_stock', { identifier: identifier.trim() })
+    );
+
+    // ── get_products_stock_bulk ─────────────────────────────────────────────
+    server.registerTool(
+      'get_products_stock_bulk',
+      {
+        title: 'Get Products Stock Bulk',
+        description:
+          'Consulta el stock de múltiples productos en una sola llamada. Acepta SKUs de combinación, SKUs base e IDs numéricos mezclados. Ideal para verificar stock de una lista sin hacer llamadas individuales.',
+        inputSchema: {
+          identifiers: z.string().describe('SKUs o IDs separados por coma (ej: "ABU04,ABU09,TDO01,48"). Máximo 100.'),
+        },
+      },
+      async ({ identifiers }) => callDbTool('get_products_stock_bulk', { identifiers: identifiers.trim() })
     );
 
     // ── search_orders ───────────────────────────────────────────────────────

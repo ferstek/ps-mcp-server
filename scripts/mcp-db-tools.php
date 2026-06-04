@@ -2,6 +2,8 @@
 /**
  * MCP DB Tools — PHP 7.3 compatible.
  * Usage: ?secret=SECRET&tool=TOOL_NAME&param1=val1...
+ *
+ * id_lang = 2 → Español AR (único idioma activo en esta tienda)
  */
 $secret = 'bTLk5SvOhwIfemioUWKclg6E2NC3yjG4';
 if (($_GET['secret'] ?? '') !== $secret) {
@@ -43,7 +45,7 @@ try {
                    COALESCE(sa.quantity,0) AS stock, p.active
             FROM zc2b_product p
             JOIN zc2b_product_lang pl
-                 ON pl.id_product = p.id_product AND pl.id_lang = 1 AND pl.id_shop = 1
+                 ON pl.id_product = p.id_product AND pl.id_lang = 2 AND pl.id_shop = 1
             LEFT JOIN zc2b_stock_available sa
                  ON sa.id_product = p.id_product AND sa.id_product_attribute = 0 AND sa.id_shop = 1
             WHERE p.active = 1
@@ -80,7 +82,7 @@ try {
             FROM zc2b_product_activity_log l
             JOIN zc2b_product p       ON p.id_product  = l.id_product
             JOIN zc2b_product_lang pl ON pl.id_product = l.id_product
-                                     AND pl.id_lang = 1 AND pl.id_shop = 1
+                                     AND pl.id_lang = 2 AND pl.id_shop = 1
             $where ORDER BY l.date_log DESC
         ", $params);
 
@@ -115,19 +117,24 @@ try {
                    prev_s.name  AS state_before,
                    curr_s.name  AS state_after,
                    oh.id_order_state AS new_state_id,
-                   oh.date_add, oh.id_employee
+                   oh.date_add,
+                   oh.id_employee,
+                   CASE WHEN oh.id_employee IS NOT NULL AND oh.id_employee > 0
+                        THEN CONCAT(e.firstname,' ',e.lastname)
+                        ELSE NULL
+                   END AS employee_name
             FROM zc2b_order_history oh
             JOIN zc2b_orders o         ON o.id_order      = oh.id_order
             JOIN zc2b_customer c       ON c.id_customer   = o.id_customer
             JOIN zc2b_order_state_lang curr_s
-                 ON curr_s.id_order_state = oh.id_order_state AND curr_s.id_lang = 1
-            LEFT JOIN zc2b_order_history prev_oh
-                 ON prev_oh.id_order = oh.id_order
-                AND prev_oh.id_order_history = (
-                    SELECT MAX(h2.id_order_history) FROM zc2b_order_history h2
-                    WHERE h2.id_order = oh.id_order AND h2.id_order_history < oh.id_order_history)
+                 ON curr_s.id_order_state = oh.id_order_state AND curr_s.id_lang = 2
             LEFT JOIN zc2b_order_state_lang prev_s
-                 ON prev_s.id_order_state = prev_oh.id_order_state AND prev_s.id_lang = 1
+                 ON prev_s.id_order_state = (
+                    SELECT h2.id_order_state FROM zc2b_order_history h2
+                    WHERE h2.id_order = oh.id_order AND h2.id_order_history < oh.id_order_history
+                    ORDER BY h2.id_order_history DESC LIMIT 1)
+                AND prev_s.id_lang = 2
+            LEFT JOIN zc2b_employee e  ON e.id_employee = oh.id_employee
             WHERE DATE(oh.date_add) BETWEEN :from AND :to $sf
             ORDER BY oh.date_add DESC
         ", $p);
@@ -140,7 +147,9 @@ try {
             $out[] = array('id_order' => (int)$r['id_order'], 'reference' => $r['reference'],
                            'customer' => $r['customer_name'], 'state_before' => $r['state_before'] ?? '—',
                            'state_after' => $r['state_after'], 'new_state_id' => (int)$r['new_state_id'],
-                           'date' => $r['date_add'], 'employee_id' => $r['id_employee']);
+                           'date' => $r['date_add'],
+                           'employee_id' => $r['id_employee'],
+                           'employee' => $r['employee_name']);
         }
         arsort($summary);
         echo json_encode(array('date_from' => $from, 'date_to' => $to, 'total_changes' => count($out),
@@ -177,7 +186,7 @@ try {
                    CASE WHEN img.id_image IS NOT NULL THEN 1 ELSE 0 END AS has_image
             FROM zc2b_product p
             JOIN zc2b_product_lang pl
-                 ON pl.id_product = p.id_product AND pl.id_lang = 1 AND pl.id_shop = 1
+                 ON pl.id_product = p.id_product AND pl.id_lang = 2 AND pl.id_shop = 1
             LEFT JOIN zc2b_stock_available sa
                  ON sa.id_product = p.id_product AND sa.id_product_attribute = 0 AND sa.id_shop = 1
             LEFT JOIN zc2b_image img ON img.id_product = p.id_product AND img.cover = 1
@@ -345,6 +354,219 @@ try {
                                'count' => count($out),
                                'total_estimated' => number_format((float)$totalAmt, 2, '.', ''),
                                'carts' => $out), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
+    // ── get_product_stock ────────────────────────────────────────────────────
+    // Busca por SKU de combinación (zc2b_product_attribute.reference),
+    // SKU de producto base (zc2b_product.reference), o id_product numérico.
+    // Devuelve todas las combinaciones del producto con su stock individual.
+    case 'get_product_stock': {
+        $identifier = trim($_GET['identifier'] ?? '');
+        if ($identifier === '') {
+            http_response_code(400); die(json_encode(array('error' => 'identifier required')));
+        }
+        $isNumeric = ctype_digit($identifier);
+
+        // SQL base: devuelve una fila por combinación
+        $baseSql = "
+            SELECT
+                p.id_product,
+                p.reference        AS base_reference,
+                pl.name            AS product_name,
+                p.active,
+                pa.id_product_attribute,
+                pa.reference       AS sku,
+                COALESCE(sa.quantity, 0) AS stock,
+                GROUP_CONCAT(
+                    CONCAT(agl.name, ': ', al.name)
+                    ORDER BY agl.id_attribute_group SEPARATOR ' / '
+                )                  AS variant
+            FROM zc2b_product p
+            JOIN zc2b_product_lang pl
+                 ON pl.id_product = p.id_product AND pl.id_lang = 2 AND pl.id_shop = 1
+            LEFT JOIN zc2b_product_attribute pa
+                 ON pa.id_product = p.id_product
+            LEFT JOIN zc2b_stock_available sa
+                 ON sa.id_product = p.id_product
+                AND sa.id_product_attribute = COALESCE(pa.id_product_attribute, 0)
+                AND sa.id_shop = 1
+            LEFT JOIN zc2b_product_attribute_combination pac
+                 ON pac.id_product_attribute = pa.id_product_attribute
+            LEFT JOIN zc2b_attribute_lang al
+                 ON al.id_attribute = pac.id_attribute AND al.id_lang = 2
+            LEFT JOIN zc2b_attribute a
+                 ON a.id_attribute = pac.id_attribute
+            LEFT JOIN zc2b_attribute_group_lang agl
+                 ON agl.id_attribute_group = a.id_attribute_group AND agl.id_lang = 2
+        ";
+
+        if ($isNumeric) {
+            // Buscar por id_product
+            $rows = dbq($pdo, "$baseSql WHERE p.id_product = :id GROUP BY pa.id_product_attribute, p.id_product",
+                        array(':id' => (int)$identifier));
+        } else {
+            // Buscar primero por SKU de combinación
+            $rows = dbq($pdo, "$baseSql WHERE pa.reference = :sku GROUP BY pa.id_product_attribute, p.id_product",
+                        array(':sku' => $identifier));
+            // Si no encuentra, buscar por SKU de producto base
+            if (empty($rows)) {
+                $rows = dbq($pdo, "$baseSql WHERE p.reference = :ref GROUP BY pa.id_product_attribute, p.id_product",
+                            array(':ref' => $identifier));
+            }
+        }
+
+        if (empty($rows)) {
+            echo json_encode(array('found' => false, 'identifier' => $identifier),
+                             JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+            break;
+        }
+
+        $first = $rows[0];
+        $combinations = array();
+        $totalStock = 0;
+        foreach ($rows as $r) {
+            $combinations[] = array(
+                'id_product_attribute' => (int)$r['id_product_attribute'],
+                'sku'     => $r['sku'],
+                'variant' => $r['variant'],
+                'stock'   => (int)$r['stock'],
+            );
+            $totalStock += (int)$r['stock'];
+        }
+
+        echo json_encode(array(
+            'found'          => true,
+            'id_product'     => (int)$first['id_product'],
+            'base_reference' => $first['base_reference'],
+            'name'           => $first['product_name'],
+            'active'         => (bool)$first['active'],
+            'total_stock'    => $totalStock,
+            'combinations'   => $combinations,
+        ), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
+    // ── get_products_stock_bulk ──────────────────────────────────────────────
+    // Acepta múltiples SKUs o id_products separados por coma.
+    // Devuelve stock total + detalle de combinaciones para cada uno.
+    case 'get_products_stock_bulk': {
+        $raw = trim($_GET['identifiers'] ?? '');
+        if ($raw === '') {
+            http_response_code(400); die(json_encode(array('error' => 'identifiers required (comma-separated SKUs or numeric IDs)')));
+        }
+        $identifiers = array_unique(array_filter(array_map('trim', explode(',', $raw))));
+        if (count($identifiers) > 100) {
+            http_response_code(400); die(json_encode(array('error' => 'max 100 identifiers per call')));
+        }
+
+        $numericIds = array();
+        $skus       = array();
+        foreach ($identifiers as $id) {
+            if (ctype_digit($id)) $numericIds[] = (int)$id;
+            else $skus[] = $id;
+        }
+
+        $results = array(); // keyed by identifier
+
+        // Query combinada: devuelve filas para todas las combinaciones pedidas
+        $baseSql = "
+            SELECT
+                p.id_product,
+                p.reference        AS base_reference,
+                pl.name            AS product_name,
+                p.active,
+                pa.id_product_attribute,
+                pa.reference       AS sku,
+                COALESCE(sa.quantity, 0) AS stock,
+                GROUP_CONCAT(
+                    CONCAT(agl.name, ': ', al.name)
+                    ORDER BY agl.id_attribute_group SEPARATOR ' / '
+                ) AS variant
+            FROM zc2b_product p
+            JOIN zc2b_product_lang pl
+                 ON pl.id_product = p.id_product AND pl.id_lang = 2 AND pl.id_shop = 1
+            LEFT JOIN zc2b_product_attribute pa
+                 ON pa.id_product = p.id_product
+            LEFT JOIN zc2b_stock_available sa
+                 ON sa.id_product = p.id_product
+                AND sa.id_product_attribute = COALESCE(pa.id_product_attribute, 0)
+                AND sa.id_shop = 1
+            LEFT JOIN zc2b_product_attribute_combination pac
+                 ON pac.id_product_attribute = pa.id_product_attribute
+            LEFT JOIN zc2b_attribute_lang al
+                 ON al.id_attribute = pac.id_attribute AND al.id_lang = 2
+            LEFT JOIN zc2b_attribute a
+                 ON a.id_attribute = pac.id_attribute
+            LEFT JOIN zc2b_attribute_group_lang agl
+                 ON agl.id_attribute_group = a.id_attribute_group AND agl.id_lang = 2
+        ";
+
+        $allRows = array();
+
+        if (!empty($numericIds)) {
+            $ph = implode(',', array_fill(0, count($numericIds), '?'));
+            $s = $pdo->prepare("$baseSql WHERE p.id_product IN ($ph) GROUP BY p.id_product, pa.id_product_attribute");
+            $s->execute($numericIds);
+            foreach ($s->fetchAll() as $r) $allRows[] = array_merge($r, array('_lookup' => (string)$r['id_product']));
+        }
+
+        if (!empty($skus)) {
+            $ph = implode(',', array_fill(0, count($skus), '?'));
+            // Try combination SKU first
+            $s = $pdo->prepare("$baseSql WHERE pa.reference IN ($ph) GROUP BY p.id_product, pa.id_product_attribute");
+            $s->execute($skus);
+            $paRows = $s->fetchAll();
+            $foundSkus = array_unique(array_column($paRows, 'sku'));
+            foreach ($paRows as $r) $allRows[] = array_merge($r, array('_lookup' => $r['sku']));
+
+            // For SKUs not found as combination references, try base product reference
+            $missing = array_diff($skus, $foundSkus);
+            if (!empty($missing)) {
+                $ph2 = implode(',', array_fill(0, count($missing), '?'));
+                $s2 = $pdo->prepare("$baseSql WHERE p.reference IN ($ph2) GROUP BY p.id_product, pa.id_product_attribute");
+                $s2->execute(array_values($missing));
+                foreach ($s2->fetchAll() as $r) $allRows[] = array_merge($r, array('_lookup' => $r['base_reference']));
+            }
+        }
+
+        // Group by lookup key
+        $grouped = array();
+        foreach ($allRows as $r) {
+            $key = $r['_lookup'];
+            if (!isset($grouped[$key])) {
+                $grouped[$key] = array(
+                    'identifier'     => $key,
+                    'id_product'     => (int)$r['id_product'],
+                    'base_reference' => $r['base_reference'],
+                    'name'           => $r['product_name'],
+                    'active'         => (bool)$r['active'],
+                    'total_stock'    => 0,
+                    'combinations'   => array(),
+                );
+            }
+            $grouped[$key]['combinations'][] = array(
+                'id_product_attribute' => (int)$r['id_product_attribute'],
+                'sku'     => $r['sku'],
+                'variant' => $r['variant'],
+                'stock'   => (int)$r['stock'],
+            );
+            $grouped[$key]['total_stock'] += (int)$r['stock'];
+        }
+
+        // Report not found
+        $found = array_values($grouped);
+        $notFound = array();
+        foreach ($identifiers as $id) {
+            if (!isset($grouped[$id])) $notFound[] = $id;
+        }
+
+        echo json_encode(array(
+            'requested'  => count($identifiers),
+            'found'      => count($found),
+            'not_found'  => $notFound,
+            'products'   => $found,
+        ), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
         break;
     }
 
