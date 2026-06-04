@@ -222,6 +222,33 @@ const mcpHandler = createMcpHandler(
         };
       }
     );
+    // ── get_order_modifications ─────────────────────────────────────────────
+    server.registerTool(
+      'get_order_modifications',
+      {
+        title: 'Get Order Modifications',
+        description:
+          'Devuelve todas las modificaciones de pedidos (artículos agregados, cambiados o eliminados) en un rango de fechas. Útil para auditar cambios hechos por empleados en los pedidos.',
+        inputSchema: {
+          date_from: z.string().describe('Fecha inicio YYYY-MM-DD, ej: 2026-06-01'),
+          date_to: z.string().describe('Fecha fin YYYY-MM-DD, ej: 2026-06-04'),
+        },
+      },
+      async ({ date_from, date_to }) => {
+        const apiUrl = process.env.DB_API_URL;
+        const apiSecret = process.env.DB_API_SECRET;
+        if (!apiUrl || !apiSecret) throw new Error('DB_API_URL and DB_API_SECRET env vars are required');
+
+        const url = `${apiUrl}?secret=${encodeURIComponent(apiSecret)}&date_from=${date_from}&date_to=${date_to}`;
+        const res = await fetch(url);
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`DB API error ${res.status}: ${text.slice(0, 200)}`);
+        }
+        const data = await res.json();
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      }
+    );
   },
   {},
   {
