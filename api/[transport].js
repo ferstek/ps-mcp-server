@@ -9,8 +9,19 @@ function getClient() {
   return new PrestaShopClient(baseUrl, apiKey);
 }
 
+function validateAuth(req) {
+  const secret = process.env.MCP_SECRET;
+  if (!secret) return; // Sin secret configurado: abierto (solo dev)
+  const auth = (req?.headers?.get?.('authorization') ?? req?.headers?.authorization ?? '');
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (token !== secret) {
+    throw Object.assign(new Error('Unauthorized'), { status: 401 });
+  }
+}
+
 const handler = createMcpHandler(
-  (server) => {
+  (server, req) => {
+    validateAuth(req);
     // ── get_order_by_reference ──────────────────────────────────────────────
     server.registerTool(
       'get_order_by_reference',
