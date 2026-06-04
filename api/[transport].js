@@ -249,6 +249,128 @@ const mcpHandler = createMcpHandler(
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
     );
+
+    // ── DB tools helper ─────────────────────────────────────────────────────
+    async function callDbTool(tool, params) {
+      const baseUrl = process.env.DB_TOOLS_URL;
+      const secret  = process.env.DB_API_SECRET;
+      if (!baseUrl || !secret) throw new Error('DB_TOOLS_URL and DB_API_SECRET env vars are required');
+      const qs = new URLSearchParams({ secret, tool, ...params }).toString();
+      const res = await fetch(`${baseUrl}?${qs}`);
+      if (!res.ok) throw new Error(`DB API error ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+
+    // ── get_stock_breaks ────────────────────────────────────────────────────
+    server.registerTool('get_stock_breaks', {
+      title: 'Get Stock Breaks',
+      description: 'Productos activos con stock 0 o por debajo de un umbral. Útil para detectar quiebres de stock.',
+      inputSchema: {
+        threshold: z.number().int().min(0).optional().default(0).describe('Stock máximo a mostrar (default 0 = solo sin stock)'),
+      },
+    }, async ({ threshold }) => callDbTool('get_stock_breaks', { threshold: String(threshold ?? 0) }));
+
+    // ── get_product_activity_log ────────────────────────────────────────────
+    server.registerTool('get_product_activity_log', {
+      title: 'Get Product Activity Log',
+      description: 'Productos activados o desactivados en un rango de fechas. Registrado via trigger en la DB.',
+      inputSchema: {
+        date_from: z.string().describe('Fecha inicio YYYY-MM-DD'),
+        date_to:   z.string().describe('Fecha fin YYYY-MM-DD'),
+        action:    z.enum(['activated','deactivated']).optional().describe('Filtrar por tipo de cambio (opcional)'),
+      },
+    }, async ({ date_from, date_to, action }) =>
+      callDbTool('get_product_activity_log', { date_from, date_to, ...(action ? { action } : {}) }));
+
+    // ── get_order_state_changes ─────────────────────────────────────────────
+    server.registerTool('get_order_state_changes', {
+      title: 'Get Order State Changes',
+      description: 'Historial de cambios de estado de pedidos en un período, con resumen por estado. Incluye estado anterior y nuevo.',
+      inputSchema: {
+        date_from: z.string().describe('Fecha inicio YYYY-MM-DD'),
+        date_to:   z.string().describe('Fecha fin YYYY-MM-DD'),
+        state_id:  z.number().int().optional().describe('Filtrar por estado destino (opcional)'),
+      },
+    }, async ({ date_from, date_to, state_id }) =>
+      callDbTool('get_order_state_changes', { date_from, date_to, ...(state_id ? { state_id: String(state_id) } : {}) }));
+
+    // ── search_products ─────────────────────────────────────────────────────
+    server.registerTool('search_products', {
+      title: 'Search Products',
+      description: 'Búsqueda flexible de productos con filtros combinables: sin SKU, sin imagen, sin precio, sin stock, por nombre, activos/inactivos.',
+      inputSchema: {
+        query:      z.string().optional().describe('Texto libre sobre el nombre del producto'),
+        no_sku:     z.boolean().optional().describe('Solo productos sin referencia/SKU'),
+        no_image:   z.boolean().optional().describe('Solo productos sin imagen de portada'),
+        no_price:   z.boolean().optional().describe('Solo productos con precio 0 o vacío'),
+        active:     z.boolean().optional().describe('Filtrar por estado activo/inactivo'),
+        no_stock:   z.boolean().optional().describe('Solo productos con stock ≤ 0'),
+        with_stock: z.boolean().optional().describe('Solo productos con stock > 0'),
+        limit:      z.number().int().min(1).max(200).optional().default(50),
+      },
+    }, async (params) => {
+      const p = { limit: String(params.limit ?? 50) };
+      if (params.query)      p.query      = params.query;
+      if (params.no_sku)     p.no_sku     = 'true';
+      if (params.no_image)   p.no_image   = 'true';
+      if (params.no_price)   p.no_price   = 'true';
+      if (params.no_stock)   p.no_stock   = 'true';
+      if (params.with_stock) p.with_stock = 'true';
+      if (params.active !== undefined) p.active = params.active ? 'true' : 'false';
+      return callDbTool('search_products', p);
+    });
+
+    // ── get_top_products ────────────────────────────────────────────────────
+    server.registerTool('get_top_products', {
+      title: 'Get Top Products',
+      description: 'Los productos más vendidos en un período, por revenue o por unidades. Excluye pedidos cancelados.',
+      inputSchema: {
+        date_from: z.string().describe('Fecha inicio YYYY-MM-DD'),
+        date_to:   z.string().describe('Fecha fin YYYY-MM-DD'),
+        limit:     z.number().int().min(1).max(100).optional().default(10),
+        order_by:  z.enum(['revenue','quantity']).optional().default('revenue'),
+      },
+    }, async ({ date_from, date_to, limit, order_by }) =>
+      callDbTool('get_top_products', { date_from, date_to, limit: String(limit ?? 10), order_by: order_by ?? 'revenue' }));
+
+    // ── get_pending_orders_aging ────────────────────────────────────────────
+    server.registerTool('get_pending_orders_aging', {
+      title: 'Get Pending Orders Aging',
+      description: 'Pedidos trabados en un estado hace más de X días, ordenados por más viejos primero. Útil para detectar pedidos olvidados.',
+      inputSchema: {
+        state_id: z.number().int().optional().default(10).describe('Estado a consultar (default 10 = En espera de armado)'),
+        min_days: z.number().int().min(1).optional().default(3).describe('Mínimo de días sin movimiento (default 3)'),
+      },
+    }, async ({ state_id, min_days }) =>
+      callDbTool('get_pending_orders_aging', { state_id: String(state_id ?? 10), min_days: String(min_days ?? 3) }));
+
+    // ── get_customer_stats ──────────────────────────────────────────────────
+    server.registerTool('get_customer_stats', {
+      title: 'Get Customer Stats',
+      description: 'Estadísticas de clientes en un período: revenue, pedidos, nuevos vs recurrentes. Excluye cancelados.',
+      inputSchema: {
+        date_from: z.string().describe('Fecha inicio YYYY-MM-DD'),
+        date_to:   z.string().describe('Fecha fin YYYY-MM-DD'),
+        limit:     z.number().int().min(1).max(200).optional().default(20),
+        order_by:  z.enum(['revenue','orders']).optional().default('revenue'),
+      },
+    }, async ({ date_from, date_to, limit, order_by }) =>
+      callDbTool('get_customer_stats', { date_from, date_to, limit: String(limit ?? 20), order_by: order_by ?? 'revenue' }));
+
+    // ── get_abandoned_carts ─────────────────────────────────────────────────
+    server.registerTool('get_abandoned_carts', {
+      title: 'Get Abandoned Carts',
+      description: 'Carritos sin completar en un rango de fechas. Incluye monto estimado, productos, cliente y última actividad.',
+      inputSchema: {
+        date_from:  z.string().describe('Fecha inicio YYYY-MM-DD'),
+        date_to:    z.string().describe('Fecha fin YYYY-MM-DD'),
+        min_amount: z.number().optional().describe('Monto mínimo del carrito para filtrar (opcional)'),
+      },
+    }, async ({ date_from, date_to, min_amount }) =>
+      callDbTool('get_abandoned_carts', { date_from, date_to, ...(min_amount ? { min_amount: String(min_amount) } : {}) }));
+
   },
   {},
   {

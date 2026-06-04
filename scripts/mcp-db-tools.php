@@ -1,0 +1,359 @@
+<?php
+/**
+ * MCP DB Tools — PHP 7.3 compatible.
+ * Usage: ?secret=SECRET&tool=TOOL_NAME&param1=val1...
+ */
+$secret = 'bTLk5SvOhwIfemioUWKclg6E2NC3yjG4';
+if (($_GET['secret'] ?? '') !== $secret) {
+    http_response_code(401);
+    die(json_encode(array('error' => 'Unauthorized')));
+}
+
+header('Content-Type: application/json; charset=utf-8');
+
+$tool = $_GET['tool'] ?? '';
+if (!$tool) {
+    http_response_code(400);
+    die(json_encode(array('error' => 'tool parameter required')));
+}
+
+try {
+    $pdo = new PDO("mysql:host=127.0.0.1;dbname=u466062032_WH9vP;charset=utf8",
+                   'u466062032_MCtWP', 'Duplex8821',
+                   array(PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC));
+} catch (PDOException $e) {
+    http_response_code(500);
+    die(json_encode(array('error' => 'DB connection failed: ' . $e->getMessage())));
+}
+
+function validDate($d) { return $d && preg_match('/^\d{4}-\d{2}-\d{2}$/', $d); }
+function dbq($pdo, $sql, $params = array()) {
+    $s = $pdo->prepare($sql); $s->execute($params); return $s->fetchAll();
+}
+
+try {
+    switch ($tool) {
+
+    // ── get_stock_breaks ─────────────────────────────────────────────────────
+    case 'get_stock_breaks': {
+        $threshold = isset($_GET['threshold']) ? (int)$_GET['threshold'] : 0;
+        $rows = dbq($pdo, "
+            SELECT p.id_product, p.reference, pl.name,
+                   COALESCE(sa.quantity,0) AS stock, p.active
+            FROM zc2b_product p
+            JOIN zc2b_product_lang pl
+                 ON pl.id_product = p.id_product AND pl.id_lang = 1 AND pl.id_shop = 1
+            LEFT JOIN zc2b_stock_available sa
+                 ON sa.id_product = p.id_product AND sa.id_product_attribute = 0 AND sa.id_shop = 1
+            WHERE p.active = 1
+              AND COALESCE(sa.quantity,0) <= :threshold
+            ORDER BY stock ASC, pl.name ASC
+        ", array(':threshold' => $threshold));
+
+        $out = array();
+        foreach ($rows as $r) {
+            $out[] = array('id_product' => (int)$r['id_product'], 'reference' => $r['reference'],
+                           'name' => $r['name'], 'stock' => (int)$r['stock'], 'active' => (bool)$r['active']);
+        }
+        echo json_encode(array('threshold' => $threshold, 'count' => count($out), 'products' => $out),
+                         JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
+    // ── get_product_activity_log ─────────────────────────────────────────────
+    case 'get_product_activity_log': {
+        $from   = $_GET['date_from'] ?? null;
+        $to     = $_GET['date_to']   ?? null;
+        $action = $_GET['action']    ?? null;
+        if (!validDate($from) || !validDate($to)) {
+            http_response_code(400); die(json_encode(array('error' => 'date_from and date_to required (YYYY-MM-DD)')));
+        }
+        $where  = "WHERE DATE(l.date_log) BETWEEN :from AND :to";
+        $params = array(':from' => $from, ':to' => $to);
+        if ($action === 'activated')   $where .= " AND l.active_after = 1 AND l.active_before = 0";
+        if ($action === 'deactivated') $where .= " AND l.active_after = 0 AND l.active_before = 1";
+
+        $rows = dbq($pdo, "
+            SELECT l.id_product, pl.name, p.reference,
+                   l.active_before, l.active_after, l.date_log
+            FROM zc2b_product_activity_log l
+            JOIN zc2b_product p       ON p.id_product  = l.id_product
+            JOIN zc2b_product_lang pl ON pl.id_product = l.id_product
+                                     AND pl.id_lang = 1 AND pl.id_shop = 1
+            $where ORDER BY l.date_log DESC
+        ", $params);
+
+        $out = array();
+        foreach ($rows as $r) {
+            $out[] = array('id_product' => (int)$r['id_product'], 'name' => $r['name'],
+                           'reference' => $r['reference'], 'active_before' => (int)$r['active_before'],
+                           'active_after' => (int)$r['active_after'],
+                           'action' => $r['active_after'] ? 'activated' : 'deactivated',
+                           'date' => $r['date_log']);
+        }
+        echo json_encode(array('date_from' => $from, 'date_to' => $to, 'count' => count($out), 'changes' => $out),
+                         JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
+    // ── get_order_state_changes ──────────────────────────────────────────────
+    case 'get_order_state_changes': {
+        $from    = $_GET['date_from'] ?? null;
+        $to      = $_GET['date_to']   ?? null;
+        $stateId = isset($_GET['state_id']) ? (int)$_GET['state_id'] : null;
+        if (!validDate($from) || !validDate($to)) {
+            http_response_code(400); die(json_encode(array('error' => 'date_from and date_to required')));
+        }
+        $sf = $stateId ? "AND oh.id_order_state = :state_id" : "";
+        $p  = array(':from' => $from, ':to' => $to);
+        if ($stateId) $p[':state_id'] = $stateId;
+
+        $rows = dbq($pdo, "
+            SELECT oh.id_order, o.reference,
+                   CONCAT(c.firstname,' ',c.lastname) AS customer_name,
+                   prev_s.name  AS state_before,
+                   curr_s.name  AS state_after,
+                   oh.id_order_state AS new_state_id,
+                   oh.date_add, oh.id_employee
+            FROM zc2b_order_history oh
+            JOIN zc2b_orders o         ON o.id_order      = oh.id_order
+            JOIN zc2b_customer c       ON c.id_customer   = o.id_customer
+            JOIN zc2b_order_state_lang curr_s
+                 ON curr_s.id_order_state = oh.id_order_state AND curr_s.id_lang = 1
+            LEFT JOIN zc2b_order_history prev_oh
+                 ON prev_oh.id_order = oh.id_order
+                AND prev_oh.id_order_history = (
+                    SELECT MAX(h2.id_order_history) FROM zc2b_order_history h2
+                    WHERE h2.id_order = oh.id_order AND h2.id_order_history < oh.id_order_history)
+            LEFT JOIN zc2b_order_state_lang prev_s
+                 ON prev_s.id_order_state = prev_oh.id_order_state AND prev_s.id_lang = 1
+            WHERE DATE(oh.date_add) BETWEEN :from AND :to $sf
+            ORDER BY oh.date_add DESC
+        ", $p);
+
+        $summary = array();
+        $out = array();
+        foreach ($rows as $r) {
+            $key = $r['state_after'] ?? 'unknown';
+            $summary[$key] = ($summary[$key] ?? 0) + 1;
+            $out[] = array('id_order' => (int)$r['id_order'], 'reference' => $r['reference'],
+                           'customer' => $r['customer_name'], 'state_before' => $r['state_before'] ?? '—',
+                           'state_after' => $r['state_after'], 'new_state_id' => (int)$r['new_state_id'],
+                           'date' => $r['date_add'], 'employee_id' => $r['id_employee']);
+        }
+        arsort($summary);
+        echo json_encode(array('date_from' => $from, 'date_to' => $to, 'total_changes' => count($out),
+                               'summary_by_state' => $summary, 'changes' => $out),
+                         JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
+    // ── search_products ──────────────────────────────────────────────────────
+    case 'search_products': {
+        $noSku    = filter_var($_GET['no_sku']    ?? false, FILTER_VALIDATE_BOOLEAN);
+        $noImage  = filter_var($_GET['no_image']  ?? false, FILTER_VALIDATE_BOOLEAN);
+        $noPrice  = filter_var($_GET['no_price']  ?? false, FILTER_VALIDATE_BOOLEAN);
+        $activeF  = isset($_GET['active']) ? filter_var($_GET['active'], FILTER_VALIDATE_BOOLEAN) : null;
+        $noStock  = filter_var($_GET['no_stock']  ?? false, FILTER_VALIDATE_BOOLEAN);
+        $withStk  = filter_var($_GET['with_stock']?? false, FILTER_VALIDATE_BOOLEAN);
+        $queryTxt = trim($_GET['query'] ?? '');
+        $limit    = min((int)($_GET['limit'] ?? 50), 200);
+
+        $where  = array("1=1"); $params = array();
+        if ($noSku)            $where[] = "(p.reference IS NULL OR p.reference = '')";
+        if ($noImage)          $where[] = "img.id_image IS NULL";
+        if ($noPrice)          $where[] = "(p.price IS NULL OR p.price = 0)";
+        if ($activeF === true) $where[] = "p.active = 1";
+        if ($activeF === false)$where[] = "p.active = 0";
+        if ($noStock)          $where[] = "COALESCE(sa.quantity,0) <= 0";
+        if ($withStk)          $where[] = "COALESCE(sa.quantity,0) > 0";
+        if ($queryTxt !== '') { $where[] = "pl.name LIKE :query"; $params[':query'] = '%'.$queryTxt.'%'; }
+
+        $whereSQL = implode(' AND ', $where);
+        $rows = dbq($pdo, "
+            SELECT p.id_product, pl.name, p.reference, p.price,
+                   COALESCE(sa.quantity,0) AS stock, p.active,
+                   CASE WHEN img.id_image IS NOT NULL THEN 1 ELSE 0 END AS has_image
+            FROM zc2b_product p
+            JOIN zc2b_product_lang pl
+                 ON pl.id_product = p.id_product AND pl.id_lang = 1 AND pl.id_shop = 1
+            LEFT JOIN zc2b_stock_available sa
+                 ON sa.id_product = p.id_product AND sa.id_product_attribute = 0 AND sa.id_shop = 1
+            LEFT JOIN zc2b_image img ON img.id_product = p.id_product AND img.cover = 1
+            WHERE $whereSQL ORDER BY pl.name ASC LIMIT $limit
+        ", $params);
+
+        $out = array();
+        foreach ($rows as $r) {
+            $out[] = array('id_product' => (int)$r['id_product'], 'name' => $r['name'],
+                           'reference' => $r['reference'], 'price' => (float)$r['price'],
+                           'stock' => (int)$r['stock'], 'active' => (bool)$r['active'],
+                           'has_image' => (bool)$r['has_image']);
+        }
+        echo json_encode(array('count' => count($out), 'products' => $out),
+                         JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
+    // ── get_top_products ─────────────────────────────────────────────────────
+    case 'get_top_products': {
+        $from    = $_GET['date_from'] ?? null;
+        $to      = $_GET['date_to']   ?? null;
+        $limit   = min((int)($_GET['limit'] ?? 10), 100);
+        $orderBy = (($_GET['order_by'] ?? 'revenue') === 'quantity') ? 'units_sold' : 'revenue';
+        if (!validDate($from) || !validDate($to)) {
+            http_response_code(400); die(json_encode(array('error' => 'date_from and date_to required')));
+        }
+        $rows = dbq($pdo, "
+            SELECT od.product_id, od.product_name, od.product_reference,
+                   SUM(od.product_quantity)     AS units_sold,
+                   SUM(od.total_price_tax_incl) AS revenue
+            FROM zc2b_order_detail od
+            JOIN zc2b_orders o ON o.id_order = od.id_order
+            WHERE DATE(o.date_add) BETWEEN :from AND :to AND o.current_state != 6
+            GROUP BY od.product_id, od.product_name, od.product_reference
+            ORDER BY $orderBy DESC LIMIT $limit
+        ", array(':from' => $from, ':to' => $to));
+
+        $totalUnits = 0; $totalRev = 0;
+        $out = array();
+        foreach ($rows as $r) {
+            $totalUnits += $r['units_sold']; $totalRev += $r['revenue'];
+            $out[] = array('id_product' => (int)$r['product_id'], 'name' => $r['product_name'],
+                           'reference' => $r['product_reference'], 'units_sold' => (int)$r['units_sold'],
+                           'revenue' => number_format((float)$r['revenue'], 2, '.', ''));
+        }
+        echo json_encode(array('date_from' => $from, 'date_to' => $to, 'order_by' => $orderBy,
+                               'total_units' => (int)$totalUnits,
+                               'total_revenue' => number_format((float)$totalRev, 2, '.', ''),
+                               'products' => $out), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
+    // ── get_pending_orders_aging ─────────────────────────────────────────────
+    case 'get_pending_orders_aging': {
+        $stateId = isset($_GET['state_id']) ? (int)$_GET['state_id'] : 10;
+        $minDays = isset($_GET['min_days'])  ? (int)$_GET['min_days']  : 3;
+        $rows = dbq($pdo, "
+            SELECT o.id_order, o.reference,
+                   CONCAT(c.firstname,' ',c.lastname) AS customer_name,
+                   c.email, o.total_paid_tax_incl, o.date_add AS order_date,
+                   lh.last_change,
+                   DATEDIFF(NOW(), lh.last_change) AS days_stuck
+            FROM zc2b_orders o
+            JOIN zc2b_customer c ON c.id_customer = o.id_customer
+            JOIN (SELECT id_order, MAX(date_add) AS last_change
+                  FROM zc2b_order_history GROUP BY id_order) lh ON lh.id_order = o.id_order
+            WHERE o.current_state = :state_id
+              AND DATEDIFF(NOW(), lh.last_change) >= :min_days
+            ORDER BY days_stuck DESC
+        ", array(':state_id' => $stateId, ':min_days' => $minDays));
+
+        $out = array();
+        foreach ($rows as $r) {
+            $out[] = array('id_order' => (int)$r['id_order'], 'reference' => $r['reference'],
+                           'customer' => $r['customer_name'], 'email' => $r['email'],
+                           'total' => (float)$r['total_paid_tax_incl'],
+                           'order_date' => $r['order_date'], 'last_state_change' => $r['last_change'],
+                           'days_stuck' => (int)$r['days_stuck']);
+        }
+        echo json_encode(array('state_id' => $stateId, 'min_days' => $minDays,
+                               'count' => count($out), 'orders' => $out),
+                         JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
+    // ── get_customer_stats ───────────────────────────────────────────────────
+    case 'get_customer_stats': {
+        $from    = $_GET['date_from'] ?? null;
+        $to      = $_GET['date_to']   ?? null;
+        $limit   = min((int)($_GET['limit'] ?? 20), 200);
+        $orderBy = (($_GET['order_by'] ?? 'revenue') === 'orders') ? 'order_count' : 'revenue';
+        if (!validDate($from) || !validDate($to)) {
+            http_response_code(400); die(json_encode(array('error' => 'date_from and date_to required')));
+        }
+        $rows = dbq($pdo, "
+            SELECT c.id_customer, CONCAT(c.firstname,' ',c.lastname) AS name, c.email,
+                   COUNT(o.id_order)           AS order_count,
+                   SUM(o.total_paid_tax_incl)  AS revenue,
+                   MAX(o.date_add)             AS last_order_date,
+                   first_o.first_ever
+            FROM zc2b_orders o
+            JOIN zc2b_customer c ON c.id_customer = o.id_customer
+            JOIN (SELECT id_customer, MIN(date_add) AS first_ever
+                  FROM zc2b_orders WHERE current_state != 6 GROUP BY id_customer) first_o
+                 ON first_o.id_customer = c.id_customer
+            WHERE DATE(o.date_add) BETWEEN :from AND :to AND o.current_state != 6
+            GROUP BY c.id_customer, c.firstname, c.lastname, c.email, first_o.first_ever
+            ORDER BY $orderBy DESC LIMIT $limit
+        ", array(':from' => $from, ':to' => $to));
+
+        $newC = 0; $recC = 0; $out = array();
+        foreach ($rows as $r) {
+            $isNew = ($r['first_ever'] >= $from . ' 00:00:00');
+            if ($isNew) $newC++; else $recC++;
+            $out[] = array('id_customer' => (int)$r['id_customer'], 'name' => $r['name'],
+                           'email' => $r['email'], 'order_count' => (int)$r['order_count'],
+                           'revenue' => number_format((float)$r['revenue'], 2, '.', ''),
+                           'last_order_date' => $r['last_order_date'], 'is_new' => $isNew);
+        }
+        echo json_encode(array('date_from' => $from, 'date_to' => $to,
+                               'unique_customers' => count($out), 'new_customers' => $newC,
+                               'recurring' => $recC, 'customers' => $out),
+                         JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
+    // ── get_abandoned_carts ──────────────────────────────────────────────────
+    case 'get_abandoned_carts': {
+        $from      = $_GET['date_from'] ?? null;
+        $to        = $_GET['date_to']   ?? null;
+        $minAmount = isset($_GET['min_amount']) ? (float)$_GET['min_amount'] : 0;
+        if (!validDate($from) || !validDate($to)) {
+            http_response_code(400); die(json_encode(array('error' => 'date_from and date_to required')));
+        }
+        $rows = dbq($pdo, "
+            SELECT cart.id_cart,
+                   CASE WHEN c.id_customer > 0 THEN CONCAT(c.firstname,' ',c.lastname) ELSE 'Invitado' END AS customer_name,
+                   c.email,
+                   SUM(cp.quantity * p.price)    AS estimated_amount,
+                   SUM(cp.quantity)              AS total_items,
+                   COUNT(DISTINCT cp.id_product) AS product_count,
+                   cart.date_add, cart.date_upd
+            FROM zc2b_cart cart
+            LEFT JOIN zc2b_orders o   ON o.id_cart     = cart.id_cart
+            LEFT JOIN zc2b_customer c ON c.id_customer = cart.id_customer
+            JOIN zc2b_cart_product cp ON cp.id_cart    = cart.id_cart
+            JOIN zc2b_product p       ON p.id_product  = cp.id_product
+            WHERE o.id_cart IS NULL AND DATE(cart.date_add) BETWEEN :from AND :to
+            GROUP BY cart.id_cart, c.firstname, c.lastname, c.email, cart.date_add, cart.date_upd
+            HAVING estimated_amount >= :min_amount
+            ORDER BY estimated_amount DESC
+        ", array(':from' => $from, ':to' => $to, ':min_amount' => $minAmount));
+
+        $totalAmt = 0; $out = array();
+        foreach ($rows as $r) {
+            $totalAmt += $r['estimated_amount'];
+            $out[] = array('id_cart' => (int)$r['id_cart'], 'customer' => $r['customer_name'],
+                           'email' => $r['email'],
+                           'estimated_amount' => number_format((float)$r['estimated_amount'], 2, '.', ''),
+                           'total_items' => (int)$r['total_items'], 'product_count' => (int)$r['product_count'],
+                           'created' => $r['date_add'], 'last_updated' => $r['date_upd']);
+        }
+        echo json_encode(array('date_from' => $from, 'date_to' => $to, 'min_amount' => $minAmount,
+                               'count' => count($out),
+                               'total_estimated' => number_format((float)$totalAmt, 2, '.', ''),
+                               'carts' => $out), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
+    default:
+        http_response_code(400);
+        echo json_encode(array('error' => "Unknown tool: $tool"));
+    }
+
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode(array('error' => $e->getMessage()));
+}
