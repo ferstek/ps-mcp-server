@@ -234,7 +234,7 @@ const mcpHandler = createMcpHandler(
 export default async function handler(req) {
   const secret = process.env.MCP_SECRET;
   if (secret) {
-    const auth = req.headers.get('authorization') ?? '';
+    const auth = (typeof req.headers.get === 'function' ? req.headers.get('authorization') : req.headers['authorization']) ?? '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
     if (token !== secret) {
       return new Response('Unauthorized', {
