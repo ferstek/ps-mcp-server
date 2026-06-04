@@ -239,15 +239,14 @@ function patchNodeRequest(req, res) {
     res.on('close', () => ac.abort());
   }
 
-  // Add Fetch-style headers.get()
+  // Replace raw headers with a proper Fetch Headers object
   if (typeof req.headers.get !== 'function') {
     const raw = req.headers;
-    req.headers = Object.assign(Object.create(null), raw, {
-      get: (name) => {
-        const v = raw[name.toLowerCase()];
-        return v != null ? (Array.isArray(v) ? v.join(', ') : String(v)) : null;
-      },
-    });
+    const h = new Headers();
+    for (const [k, v] of Object.entries(raw)) {
+      if (v != null) h.set(k, Array.isArray(v) ? v.join(', ') : String(v));
+    }
+    req.headers = h;
   }
 
   // Make req.url absolute — adapter does new Request(req.url) which requires a full URL
