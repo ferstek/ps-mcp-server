@@ -250,6 +250,13 @@ function patchNodeRequest(req, res) {
     });
   }
 
+  // Make req.url absolute — adapter does new Request(req.url) which requires a full URL
+  if (req.url && !req.url.startsWith('http')) {
+    const proto = (req.headers['x-forwarded-proto'] ?? 'https').toString().split(',')[0].trim();
+    const host = (req.headers['x-forwarded-host'] ?? req.headers['host'] ?? 'localhost').toString().split(',')[0].trim();
+    req.url = `${proto}://${host}${req.url}`;
+  }
+
   // Add req.text() / req.json() (adapter reads the body this way)
   if (typeof req.text !== 'function') {
     req.text = () =>
