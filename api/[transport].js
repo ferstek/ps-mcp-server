@@ -9,19 +9,8 @@ function getClient() {
   return new PrestaShopClient(baseUrl, apiKey);
 }
 
-function validateAuth(req) {
-  const secret = process.env.MCP_SECRET;
-  if (!secret) return; // Sin secret configurado: abierto (solo dev)
-  const auth = (req?.headers?.get?.('authorization') ?? req?.headers?.authorization ?? '');
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-  if (token !== secret) {
-    throw Object.assign(new Error('Unauthorized'), { status: 401 });
-  }
-}
-
-const handler = createMcpHandler(
-  (server, req) => {
-    validateAuth(req);
+const mcpHandler = createMcpHandler(
+  (server) => {
     // ── get_order_by_reference ──────────────────────────────────────────────
     server.registerTool(
       'get_order_by_reference',
@@ -242,4 +231,17 @@ const handler = createMcpHandler(
   }
 );
 
-export default handler;
+export default async function handler(req) {
+  const secret = process.env.MCP_SECRET;
+  if (secret) {
+    const auth = req.headers.get('authorization') ?? '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+    if (token !== secret) {
+      return new Response('Unauthorized', {
+        status: 401,
+        headers: { 'WWW-Authenticate': 'Bearer' },
+      });
+    }
+  }
+  return mcpHandler(req);
+}
