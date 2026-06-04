@@ -1,0 +1,20 @@
+{
+  "name": "ps-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for PrestaShop - Tienda Ballerina",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "@vercel/mcp-adapter": "^1.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "vercel": "^44.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
