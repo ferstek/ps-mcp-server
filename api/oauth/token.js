@@ -1,7 +1,5 @@
-/**
- * OAuth 2.0 client_credentials token endpoint.
- * claude.ai POSTs here with client_id + client_secret and recibe un access_token.
- */
+import { verifyCode } from '../authorize.js';
+
 export default async function handler(req) {
   if (req.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 });
@@ -9,25 +7,38 @@ export default async function handler(req) {
 
   const body = await req.text();
   const params = new URLSearchParams(body);
-  const clientId = params.get('client_id');
-  const clientSecret = params.get('client_secret');
   const grantType = params.get('grant_type');
-
-  if (grantType !== 'client_credentials') {
-    return Response.json({ error: 'unsupported_grant_type' }, { status: 400 });
-  }
-
   const secret = process.env.MCP_SECRET;
-  if (!secret || clientSecret !== secret) {
-    return Response.json({ error: 'invalid_client' }, { status: 401 });
+
+  if (!secret) {
+    return Response.json({ error: 'server_error' }, { status: 500 });
   }
 
-  // El access_token ES el secret — stateless, sin DB
-  return Response.json({
-    access_token: secret,
-    token_type: 'bearer',
-    expires_in: 3600,
-  });
+  if (grantType === 'authorization_code') {
+    const code = params.get('code');
+    if (!code || !verifyCode(code, secret)) {
+      return Response.json({ error: 'invalid_grant' }, { status: 400 });
+    }
+    return Response.json({
+      access_token: secret,
+      token_type: 'bearer',
+      expires_in: 3600,
+    });
+  }
+
+  if (grantType === 'client_credentials') {
+    const clientSecret = params.get('client_secret');
+    if (clientSecret !== secret) {
+      return Response.json({ error: 'invalid_client' }, { status: 401 });
+    }
+    return Response.json({
+      access_token: secret,
+      token_type: 'bearer',
+      expires_in: 3600,
+    });
+  }
+
+  return Response.json({ error: 'unsupported_grant_type' }, { status: 400 });
 }
 
-export const config = { runtime: 'edge' };
+export const config = { runtime: 'nodejs' };
