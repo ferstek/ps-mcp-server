@@ -4,8 +4,8 @@ export default function handler(req) {
 
   return Response.json({
     issuer: base,
-    authorization_endpoint: `${base}/api/authorize`,
-    token_endpoint: `${base}/api/oauth/token`,
+    authorization_endpoint: `${base}/authorize`,
+    token_endpoint: `${base}/oauth/token`,
     grant_types_supported: ['authorization_code', 'client_credentials'],
     response_types_supported: ['code'],
     code_challenge_methods_supported: ['S256'],

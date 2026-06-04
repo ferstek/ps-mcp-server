@@ -1,17 +1,11 @@
 {
   "rewrites": [
-    {
-      "source": "/.well-known/oauth-authorization-server",
-      "destination": "/api/.well-known/oauth-authorization-server"
-    },
-    {
-      "source": "/authorize",
-      "destination": "/api/authorize"
-    }
+    { "source": "/.well-known/:path*", "destination": "/api/.well-known/:path*" },
+    { "source": "/authorize",          "destination": "/api/authorize" },
+    { "source": "/oauth/token",        "destination": "/api/oauth/token" },
+    { "source": "/token",              "destination": "/api/oauth/token" }
   ],
   "functions": {
-    "api/[transport].js": {
-      "maxDuration": 60
-    }
+    "api/[transport].js": { "maxDuration": 60 }
   }
 }
