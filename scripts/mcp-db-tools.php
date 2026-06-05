@@ -570,6 +570,99 @@ try {
         break;
     }
 
+    // ── get_order_details ────────────────────────────────────────────────────
+    case 'get_order_details': {
+        $from   = $_GET['date_from'] ?? null;
+        $to     = $_GET['date_to']   ?? null;
+        $search = trim($_GET['search'] ?? '');
+        $limit  = min((int)($_GET['limit'] ?? 200), 1000);
+
+        if (!validDate($from) || !validDate($to)) {
+            http_response_code(400);
+            die(json_encode(array('error' => 'date_from and date_to required (YYYY-MM-DD)')));
+        }
+        $toFull = $to . ' 23:59:59';
+
+        // excluded states: default [6=Cancelado, 7=Reembolsado], override via exclude_states=6,7,8
+        $rawExclude = trim($_GET['exclude_states'] ?? '');
+        if ($rawExclude !== '') {
+            $excludeIds = array_map('intval', array_filter(explode(',', $rawExclude), 'ctype_digit'));
+        } else {
+            $excludeIds = array(6, 7);
+        }
+
+        $where  = array("o.date_add BETWEEN :from AND :to");
+        $params = array(':from' => $from . ' 00:00:00', ':to' => $toFull);
+
+        if (!empty($excludeIds)) {
+            $ph = implode(',', $excludeIds); // safe — all integers
+            $where[] = "o.current_state NOT IN ($ph)";
+        }
+        if ($search !== '') {
+            $where[] = "(od.product_name LIKE :search OR od.product_reference LIKE :search)";
+            $params[':search'] = '%' . $search . '%';
+        }
+
+        $whereSQL = implode(' AND ', $where);
+
+        $rows = dbq($pdo, "
+            SELECT
+                od.product_id,
+                od.product_name,
+                od.product_reference,
+                od.product_quantity          AS quantity,
+                od.total_price_tax_excl      AS total_price,
+                od.id_order                  AS order_id,
+                o.reference                  AS order_reference,
+                o.date_add                   AS order_date,
+                osl.name                     AS order_state
+            FROM zc2b_order_detail od
+            JOIN zc2b_orders o
+                 ON o.id_order = od.id_order
+            LEFT JOIN zc2b_order_state_lang osl
+                 ON osl.id_order_state = o.current_state AND osl.id_lang = 2
+            WHERE $whereSQL
+            ORDER BY o.date_add DESC, od.id_order, od.product_name
+            LIMIT $limit
+        ", $params);
+
+        $totalUnits    = 0;
+        $totalRevenue  = 0.0;
+        $uniqueProducts = array();
+        $lines = array();
+
+        foreach ($rows as $r) {
+            $totalUnits   += (int)$r['quantity'];
+            $totalRevenue += (float)$r['total_price'];
+            $uniqueProducts[$r['product_id']] = true;
+            $lines[] = array(
+                'product_id'        => (int)$r['product_id'],
+                'product_name'      => $r['product_name'],
+                'product_reference' => $r['product_reference'],
+                'quantity'          => (int)$r['quantity'],
+                'total_price'       => number_format((float)$r['total_price'], 2, '.', ''),
+                'order_id'          => (int)$r['order_id'],
+                'order_reference'   => $r['order_reference'],
+                'order_date'        => $r['order_date'],
+                'order_state'       => $r['order_state'],
+            );
+        }
+
+        echo json_encode(array(
+            'date_from'       => $from,
+            'date_to'         => $to,
+            'exclude_states'  => $excludeIds,
+            'summary'         => array(
+                'total_lines'     => count($lines),
+                'total_units'     => $totalUnits,
+                'total_revenue'   => number_format($totalRevenue, 2, '.', ''),
+                'unique_products' => count($uniqueProducts),
+            ),
+            'lines' => $lines,
+        ), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
     default:
         http_response_code(400);
         echo json_encode(array('error' => "Unknown tool: $tool"));

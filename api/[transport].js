@@ -226,6 +226,25 @@ const mcpHandler = createMcpHandler(
         };
       }
     );
+    // ── get_order_details ───────────────────────────────────────────────────
+    server.registerTool('get_order_details', {
+      title: 'Get Order Details',
+      description:
+        'Devuelve las líneas de productos vendidos (order_detail) en un rango de fechas, con referencia, cantidad, precio sin IVA y estado del pedido. Excluye Cancelados y Reembolsados por default. Incluye resumen de unidades, revenue y productos únicos.',
+      inputSchema: {
+        date_from:      z.string().describe('Fecha inicio YYYY-MM-DD'),
+        date_to:        z.string().describe('Fecha fin YYYY-MM-DD'),
+        search:         z.string().optional().describe('Filtrar por nombre o referencia de producto (LIKE)'),
+        exclude_states: z.string().optional().describe('IDs de estados a excluir, separados por coma (default "6,7" = Cancelado y Reembolsado)'),
+        limit:          z.number().int().min(1).max(1000).optional().default(200),
+      },
+    }, async ({ date_from, date_to, search, exclude_states, limit }) => {
+      const p = { date_from, date_to, limit: String(limit ?? 200) };
+      if (search)         p.search         = search;
+      if (exclude_states) p.exclude_states = exclude_states;
+      return callDbTool('get_order_details', p);
+    });
+
     // ── get_order_modifications ─────────────────────────────────────────────
     server.registerTool(
       'get_order_modifications',
