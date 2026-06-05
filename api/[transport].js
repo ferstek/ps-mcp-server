@@ -286,6 +286,23 @@ const mcpHandler = createMcpHandler(
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
 
+    // ── get_sales_by_sku ────────────────────────────────────────────────────
+    server.registerTool('get_sales_by_sku', {
+      title: 'Get Sales by SKU',
+      description:
+        'Ventas históricas de un SKU específico en un período: unidades, revenue (con y sin IVA), cantidad de pedidos y desglose mensual. Filtra por referencia exacta (no LIKE). Excluye Cancelados y Reembolsados por default.',
+      inputSchema: {
+        sku:            z.string().describe('Referencia exacta del producto o combinación (ej: ABU04)'),
+        date_from:      z.string().describe('Fecha inicio YYYY-MM-DD'),
+        date_to:        z.string().describe('Fecha fin YYYY-MM-DD'),
+        exclude_states: z.string().optional().describe('IDs de estados a excluir separados por coma (default "6,7")'),
+      },
+    }, async ({ sku, date_from, date_to, exclude_states }) => {
+      const p = { sku: sku.trim(), date_from, date_to };
+      if (exclude_states) p.exclude_states = exclude_states;
+      return callDbTool('get_sales_by_sku', p);
+    });
+
     // ── get_product_combinations ───────────────────────────────────────────
     server.registerTool('get_product_combinations', {
       title: 'Get Product Combinations',

@@ -829,6 +829,130 @@ try {
         break;
     }
 
+    // ── get_sales_by_sku ─────────────────────────────────────────────────────
+    case 'get_sales_by_sku': {
+        $sku    = trim($_GET['sku']       ?? '');
+        $from   = $_GET['date_from']      ?? null;
+        $to     = $_GET['date_to']        ?? null;
+
+        if ($sku === '') {
+            http_response_code(400); die(json_encode(array('error' => 'sku required')));
+        }
+        if (!validDate($from) || !validDate($to)) {
+            http_response_code(400); die(json_encode(array('error' => 'date_from and date_to required (YYYY-MM-DD)')));
+        }
+        $toFull = $to . ' 23:59:59';
+
+        $rawExclude = trim($_GET['exclude_states'] ?? '');
+        $excludeIds = $rawExclude !== ''
+            ? array_map('intval', array_filter(explode(',', $rawExclude), 'ctype_digit'))
+            : array(6, 7);
+
+        $excludeSQL = !empty($excludeIds)
+            ? 'AND o.current_state NOT IN (' . implode(',', $excludeIds) . ')'
+            : '';
+
+        // Totals
+        $totals = $pdo->prepare("
+            SELECT
+                COUNT(DISTINCT od.id_order)          AS order_count,
+                SUM(od.product_quantity)              AS units_sold,
+                SUM(od.total_price_tax_excl)          AS revenue_excl,
+                SUM(od.total_price_tax_incl)          AS revenue_incl
+            FROM zc2b_order_detail od
+            JOIN zc2b_orders o ON o.id_order = od.id_order
+            WHERE od.product_reference = :sku
+              AND o.date_add BETWEEN :from AND :to
+              $excludeSQL
+        ");
+        $totals->execute(array(':sku' => $sku, ':from' => $from . ' 00:00:00', ':to' => $toFull));
+        $t = $totals->fetch();
+
+        if ((int)$t['order_count'] === 0) {
+            echo json_encode(array(
+                'sku'         => $sku,
+                'date_from'   => $from,
+                'date_to'     => $to,
+                'found'       => false,
+                'message'     => "No se encontraron ventas para el SKU \"$sku\" en el período indicado.",
+            ), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+            break;
+        }
+
+        // Monthly breakdown
+        $monthly = $pdo->prepare("
+            SELECT
+                DATE_FORMAT(o.date_add, '%Y-%m')      AS month,
+                COUNT(DISTINCT od.id_order)            AS order_count,
+                SUM(od.product_quantity)               AS units_sold,
+                SUM(od.total_price_tax_excl)           AS revenue_excl,
+                SUM(od.total_price_tax_incl)           AS revenue_incl
+            FROM zc2b_order_detail od
+            JOIN zc2b_orders o ON o.id_order = od.id_order
+            WHERE od.product_reference = :sku
+              AND o.date_add BETWEEN :from AND :to
+              $excludeSQL
+            GROUP BY DATE_FORMAT(o.date_add, '%Y-%m')
+            ORDER BY month ASC
+        ");
+        $monthly->execute(array(':sku' => $sku, ':from' => $from . ' 00:00:00', ':to' => $toFull));
+        $months = $monthly->fetchAll();
+
+        // Product info
+        $info = $pdo->prepare("
+            SELECT p.id_product, pl.name, pa.reference AS sku
+            FROM zc2b_product_attribute pa
+            JOIN zc2b_product p ON p.id_product = pa.id_product
+            JOIN zc2b_product_lang pl ON pl.id_product = p.id_product AND pl.id_lang = 2 AND pl.id_shop = 1
+            WHERE pa.reference = :sku
+            LIMIT 1
+        ");
+        $info->execute(array(':sku' => $sku));
+        $prod = $info->fetch();
+
+        // If not found as combination, try base product reference
+        if (!$prod) {
+            $info2 = $pdo->prepare("
+                SELECT p.id_product, pl.name, p.reference AS sku
+                FROM zc2b_product p
+                JOIN zc2b_product_lang pl ON pl.id_product = p.id_product AND pl.id_lang = 2 AND pl.id_shop = 1
+                WHERE p.reference = :sku
+                LIMIT 1
+            ");
+            $info2->execute(array(':sku' => $sku));
+            $prod = $info2->fetch();
+        }
+
+        $breakdown = array();
+        foreach ($months as $m) {
+            $breakdown[] = array(
+                'month'       => $m['month'],
+                'order_count' => (int)$m['order_count'],
+                'units_sold'  => (int)$m['units_sold'],
+                'revenue_excl'=> number_format((float)$m['revenue_excl'], 2, '.', ''),
+                'revenue_incl'=> number_format((float)$m['revenue_incl'], 2, '.', ''),
+            );
+        }
+
+        echo json_encode(array(
+            'sku'            => $sku,
+            'product_name'   => $prod ? $prod['name'] : null,
+            'id_product'     => $prod ? (int)$prod['id_product'] : null,
+            'date_from'      => $from,
+            'date_to'        => $to,
+            'exclude_states' => $excludeIds,
+            'found'          => true,
+            'summary'        => array(
+                'order_count'  => (int)$t['order_count'],
+                'units_sold'   => (int)$t['units_sold'],
+                'revenue_excl' => number_format((float)$t['revenue_excl'], 2, '.', ''),
+                'revenue_incl' => number_format((float)$t['revenue_incl'], 2, '.', ''),
+            ),
+            'monthly'        => $breakdown,
+        ), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
     default:
         http_response_code(400);
         echo json_encode(array('error' => "Unknown tool: $tool"));
