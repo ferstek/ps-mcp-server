@@ -357,6 +357,172 @@ try {
         break;
     }
 
+    // ── get_product_combinations ─────────────────────────────────────────────
+    // Devuelve todas las combinaciones de un producto con: SKU, variante, stock,
+    // precio sin IVA, precio con IVA, y precio especial vigente si existe.
+    case 'get_product_combinations': {
+        $identifier = trim($_GET['identifier'] ?? '');
+        if ($identifier === '') {
+            http_response_code(400); die(json_encode(array('error' => 'identifier required (SKU or id_product)')));
+        }
+        $isNumeric = ctype_digit($identifier);
+
+        // Resolve to id_product first
+        if ($isNumeric) {
+            $idProduct = (int)$identifier;
+        } else {
+            // Try combination SKU, then base SKU
+            $r = $pdo->prepare("SELECT id_product FROM zc2b_product_attribute WHERE reference = ? LIMIT 1");
+            $r->execute(array($identifier));
+            $row = $r->fetch();
+            if ($row) {
+                $idProduct = (int)$row['id_product'];
+            } else {
+                $r2 = $pdo->prepare("SELECT id_product FROM zc2b_product WHERE reference = ? LIMIT 1");
+                $r2->execute(array($identifier));
+                $row2 = $r2->fetch();
+                if (!$row2) {
+                    echo json_encode(array('found' => false, 'identifier' => $identifier),
+                                     JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+                    break;
+                }
+                $idProduct = (int)$row2['id_product'];
+            }
+        }
+
+        // Main query: combinations with price and stock
+        $rows = dbq($pdo, "
+            SELECT
+                p.id_product,
+                p.reference        AS base_reference,
+                pl.name            AS product_name,
+                p.active,
+                p.price            AS base_price,
+                p.id_tax_rules_group,
+                pa.id_product_attribute,
+                pa.reference       AS sku,
+                pa.price           AS impact_on_price,
+                (p.price + pa.price) AS price_excl_tax,
+                COALESCE(sa.quantity, 0) AS stock,
+                GROUP_CONCAT(
+                    CONCAT(agl.name, ': ', al.name)
+                    ORDER BY agl.id_attribute_group SEPARATOR ' / '
+                ) AS variant
+            FROM zc2b_product p
+            JOIN zc2b_product_lang pl
+                 ON pl.id_product = p.id_product AND pl.id_lang = 2 AND pl.id_shop = 1
+            JOIN zc2b_product_attribute pa
+                 ON pa.id_product = p.id_product
+            LEFT JOIN zc2b_stock_available sa
+                 ON sa.id_product = p.id_product
+                AND sa.id_product_attribute = pa.id_product_attribute
+                AND sa.id_shop = 1
+            LEFT JOIN zc2b_product_attribute_combination pac
+                 ON pac.id_product_attribute = pa.id_product_attribute
+            LEFT JOIN zc2b_attribute_lang al
+                 ON al.id_attribute = pac.id_attribute AND al.id_lang = 2
+            LEFT JOIN zc2b_attribute a
+                 ON a.id_attribute = pac.id_attribute
+            LEFT JOIN zc2b_attribute_group_lang agl
+                 ON agl.id_attribute_group = a.id_attribute_group AND agl.id_lang = 2
+            WHERE p.id_product = :id
+            GROUP BY pa.id_product_attribute
+            ORDER BY pa.reference
+        ", array(':id' => $idProduct));
+
+        if (empty($rows)) {
+            echo json_encode(array('found' => false, 'identifier' => $identifier),
+                             JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+            break;
+        }
+
+        // Get tax rate for this product
+        $taxRate = 0.0;
+        $first = $rows[0];
+        if ($first['id_tax_rules_group']) {
+            $taxRow = $pdo->prepare("
+                SELECT MAX(t.rate) AS rate
+                FROM zc2b_tax_rule tr
+                JOIN zc2b_tax t ON t.id_tax = tr.id_tax
+                WHERE tr.id_tax_rules_group = ?
+            ");
+            $taxRow->execute(array($first['id_tax_rules_group']));
+            $tr = $taxRow->fetch();
+            if ($tr) $taxRate = (float)$tr['rate'];
+        }
+
+        // Get active specific prices for this product (fixed price overrides)
+        $spStmt = $pdo->prepare("
+            SELECT id_product_attribute,
+                   price          AS sp_price,
+                   reduction,
+                   reduction_type,
+                   from_quantity
+            FROM zc2b_specific_price
+            WHERE id_product = ?
+              AND id_shop IN (0, 1)
+              AND (from_quantity = 1 OR from_quantity = 0)
+              AND (`to`   = '0000-00-00 00:00:00' OR `to`   >= NOW())
+              AND (`from` = '0000-00-00 00:00:00' OR `from` <= NOW())
+            ORDER BY id_product_attribute, from_quantity DESC
+        ");
+        $spStmt->execute(array($idProduct));
+        $spMap = array(); // id_product_attribute => row
+        foreach ($spStmt->fetchAll() as $sp) {
+            $key = (int)$sp['id_product_attribute'];
+            if (!isset($spMap[$key])) $spMap[$key] = $sp;
+        }
+
+        $multiplier = 1 + $taxRate / 100;
+        $totalStock = 0;
+        $combinations = array();
+
+        foreach ($rows as $r) {
+            $idPa        = (int)$r['id_product_attribute'];
+            $priceExcl   = (float)$r['price_excl_tax'];
+
+            // Check specific price: attribute-specific first, then product-wide (id_product_attribute=0)
+            $sp = $spMap[$idPa] ?? $spMap[0] ?? null;
+            $salePrice = null;
+            if ($sp) {
+                if ((float)$sp['sp_price'] != -1) {
+                    // Fixed override price (excl tax)
+                    $salePrice = round((float)$sp['sp_price'] * $multiplier, 2);
+                } elseif ((float)$sp['reduction'] > 0) {
+                    if ($sp['reduction_type'] === 'percentage') {
+                        $salePrice = round($priceExcl * (1 - (float)$sp['reduction']) * $multiplier, 2);
+                    } else {
+                        $salePrice = round(($priceExcl - (float)$sp['reduction']) * $multiplier, 2);
+                    }
+                }
+            }
+
+            $totalStock += (int)$r['stock'];
+            $combinations[] = array(
+                'id_product_attribute' => $idPa,
+                'sku'           => $r['sku'],
+                'variant'       => $r['variant'],
+                'stock'         => (int)$r['stock'],
+                'price_excl'    => round($priceExcl, 2),
+                'price_incl'    => round($priceExcl * $multiplier, 2),
+                'tax_rate'      => $taxRate,
+                'sale_price'    => $salePrice, // null if no active special price
+            );
+        }
+
+        echo json_encode(array(
+            'found'          => true,
+            'id_product'     => $idProduct,
+            'base_reference' => $first['base_reference'],
+            'name'           => $first['product_name'],
+            'active'         => (bool)$first['active'],
+            'tax_rate'       => $taxRate,
+            'total_stock'    => $totalStock,
+            'combinations'   => $combinations,
+        ), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        break;
+    }
+
     // ── get_product_stock ────────────────────────────────────────────────────
     // Busca por SKU de combinación (zc2b_product_attribute.reference),
     // SKU de producto base (zc2b_product.reference), o id_product numérico.

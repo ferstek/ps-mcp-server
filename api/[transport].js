@@ -286,6 +286,16 @@ const mcpHandler = createMcpHandler(
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
 
+    // ── get_product_combinations ───────────────────────────────────────────
+    server.registerTool('get_product_combinations', {
+      title: 'Get Product Combinations',
+      description:
+        'Devuelve todas las combinaciones/variantes de un producto con SKU, variante, stock, precio sin IVA, precio con IVA y precio especial vigente. Acepta SKU de combinación (ej: ABU04), SKU base o ID numérico del producto.',
+      inputSchema: {
+        identifier: z.string().describe('SKU de combinación (ej: ABU04), SKU base o ID numérico del producto (ej: 48)'),
+      },
+    }, async ({ identifier }) => callDbTool('get_product_combinations', { identifier: identifier.trim() }));
+
     // ── get_stock_breaks ────────────────────────────────────────────────────
     server.registerTool('get_stock_breaks', {
       title: 'Get Stock Breaks',
